@@ -152,6 +152,16 @@ async function getReportToday() {
   return { dateStr, fresh: row.fresh, fu: row.fu };
 }
 
+async function getReportByDate(dateStr) {
+  const row = await getReportRow(dateStr);
+  return {
+    dateStr,
+    fresh: row.fresh,
+    fu: row.fu,
+    found: row.rowIndex !== null,
+  };
+}
+
 // Opsional: reset counter hari ini (kalau salah hitung / testing)
 async function resetReportToday() {
   const dateStr = todayKeyWIB();
@@ -181,16 +191,13 @@ async function resetReportToday() {
 
 /* =======================
    REPORT BULANAN
-   /reportmonth 2
+   /reportmonth 12 2025
+   /reportmonth 1 2026
    /reportmonth 2 2026
 ======================= */
-async function getReportMonth(month, year = null) {
-  const d = new Date();
-  const wib = new Date(d.getTime() + 7 * 60 * 60 * 1000);
-  const yyyy = year ?? wib.getUTCFullYear();
-
+async function getReportMonth(month, year) {
   const mm = String(month).padStart(2, "0");
-  const prefix = `${yyyy}-${mm}-`;
+  const prefix = `${year}-${mm}-`;
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
@@ -212,7 +219,7 @@ async function getReportMonth(month, year = null) {
     daysCount += 1;
   }
 
-  return { year: yyyy, month: mm, fresh: freshSum, fu: fuSum, days: daysCount };
+  return { year, month: mm, fresh: freshSum, fu: fuSum, days: daysCount };
 }
 
 /* =======================
@@ -285,6 +292,7 @@ END:VCARD`
       await sleep(1200);
     }
 
+    // UPDATE SHEET: clear kolom + append sisa
     await sheets.spreadsheets.values.clear({
       spreadsheetId: SHEET_ID,
       range: `${SHEET_NAME}!${col}:${col}`,
@@ -342,7 +350,7 @@ bot.on("message", async (msg) => {
   if (text === "/start") {
     await bot.sendMessage(
       chatId,
-      "✅ Bot aktif.\n\nGunakan:\n#vcardfresh JUMLAH\n#vcardfu JUMLAH\n\nLaporan:\n/report\n/reportmonth BULAN(1-12) TAHUN\n/reset (opsional)\n\nContoh:\n/reportmonth 12 2025\n/reportmonth 1 2026\n/reportmonth 2 2026"
+      "✅ Bot aktif.\n\nGunakan:\n#vcardfresh JUMLAH\n#vcardfu JUMLAH\n\nLaporan:\n/report\n/reportdate YYYY-MM-DD\n/reportmonth BULAN(1-12) TAHUN\n/reset (opsional)\n\nContoh:\n/reportdate 2026-02-22\n/reportmonth 12 2025\n/reportmonth 1 2026\n/reportmonth 2 2026"
     );
     return;
   }
@@ -361,6 +369,27 @@ bot.on("message", async (msg) => {
         chatId,
         "❌ Gagal ambil report. Pastikan sheet REPORT ada & header-nya bener."
       );
+    }
+    return;
+  }
+
+  // REPORT TANGGAL TERTENTU: /reportdate 2026-02-22
+  const rd = text.match(/^\/reportdate\s+(\d{4}-\d{2}-\d{2})$/i);
+  if (rd) {
+    const dateStr = rd[1];
+    try {
+      const rep = await getReportByDate(dateStr);
+      if (!rep.found) {
+        await bot.sendMessage(chatId, `📊 REPORT ${dateStr}\nData tidak ditemukan.`);
+      } else {
+        await bot.sendMessage(
+          chatId,
+          `📊 REPORT ${dateStr}\n✅ FRESH keluar: ${rep.fresh}\n✅ FU keluar: ${rep.fu}`
+        );
+      }
+    } catch (e) {
+      console.error("❌ /reportdate ERROR:", e);
+      await bot.sendMessage(chatId, "❌ Gagal ambil report tanggal.");
     }
     return;
   }

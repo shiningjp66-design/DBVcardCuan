@@ -170,7 +170,7 @@ END:VCARD`
       });
     }
 
-    await bot.sendMessage(userId, "✅ VCARD Done Kirim");
+    await bot.sendMessage(userId, "✅ PASTIKAN TIDAK SALAH TEMPLATE. SEMANGAT !");
 
   } catch (e) {
     console.error("❌ ERROR:", e);
@@ -210,6 +210,7 @@ bot.on("message", msg => {
 });
 
 console.log("🤖 BOT FINAL FIX — FILE PASTI TERKIRIM");
+
 
 
 

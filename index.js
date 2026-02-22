@@ -13,8 +13,9 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL;
 
 const WEBHOOK_PATH = "/webhook";
-const SHEET_NAME = "DB CUAN";
-const REPORT_SHEET = "REPORT";
+const SHEET_NAME = "DB CUAN";        // sheet stok db (kolom A=FRESH, D=FU)
+const REPORT_SHEET = "REPORT";       // sheet report harian (DATE | FRESH_OUT | FU_OUT)
+const STAFF_SHEET = "STAFF_REPORT";  // sheet report staff (DATE | STAFF | FRESH_OUT | FU_OUT)
 
 if (!BOT_TOKEN || !SHEET_ID || !GOOGLE_CREDENTIALS || !BASE_URL) {
   console.error("❌ ENV belum lengkap");
@@ -76,6 +77,41 @@ const chunk = (arr, parts) => {
   );
 };
 
+// ✅ Support angka pakai titik/koma/teks: "17.000" => 17000
+const parseNumberLoose = (v) => {
+  const digits = String(v ?? "").replace(/\D/g, "");
+  return digits ? parseInt(digits, 10) : 0;
+};
+
+function getStaffName(msg) {
+  if (msg?.from?.username) return `@${msg.from.username}`;
+  return msg?.from?.first_name || "UNKNOWN";
+}
+
+// Hitung sisa stok berdasarkan rules nomor (>=10 digit)
+async function getStockCounts() {
+  const [aRes, dRes] = await Promise.all([
+    sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_NAME}!A:A`,
+    }),
+    sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_NAME}!D:D`,
+    }),
+  ]);
+
+  const cleanCount = (values) =>
+    (values || [])
+      .map((v) => String(v?.[0] || "").replace(/\D/g, ""))
+      .filter((v) => v.length >= 10).length;
+
+  return {
+    freshLeft: cleanCount(aRes.data.values),
+    fuLeft: cleanCount(dRes.data.values),
+  };
+}
+
 /* =======================
    REPORT (HARIAN) - WIB
    Sheet: REPORT
@@ -103,8 +139,8 @@ async function getReportRow(dateStr) {
     if (String(date || "").trim() === dateStr) {
       return {
         rowIndex: i + 2,
-        fresh: parseInt(fresh || "0", 10) || 0,
-        fu: parseInt(fu || "0", 10) || 0,
+        fresh: parseNumberLoose(fresh),
+        fu: parseNumberLoose(fu),
       };
     }
   }
@@ -192,8 +228,6 @@ async function resetReportToday() {
 /* =======================
    REPORT BULANAN
    /reportmonth 12 2025
-   /reportmonth 1 2026
-   /reportmonth 2 2026
 ======================= */
 async function getReportMonth(month, year) {
   const mm = String(month).padStart(2, "0");
@@ -214,12 +248,130 @@ async function getReportMonth(month, year) {
     const ds = String(date || "").trim();
     if (!ds.startsWith(prefix)) continue;
 
-    freshSum += parseInt(fresh || "0", 10) || 0;
-    fuSum += parseInt(fu || "0", 10) || 0;
+    freshSum += parseNumberLoose(fresh);
+    fuSum += parseNumberLoose(fu);
     daysCount += 1;
   }
 
   return { year, month: mm, fresh: freshSum, fu: fuSum, days: daysCount };
+}
+
+/* =======================
+   STAFF REPORT (PER HARI)
+   Sheet: STAFF_REPORT
+   Kolom: DATE | STAFF | FRESH_OUT | FU_OUT
+======================= */
+async function getStaffRow(dateStr, staff) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${STAFF_SHEET}!A2:D`,
+  });
+
+  const rows = res.data.values || [];
+  for (let i = 0; i < rows.length; i++) {
+    const [date, s, fresh, fu] = rows[i] || [];
+    if (String(date || "").trim() === dateStr && String(s || "").trim() === staff) {
+      return {
+        rowIndex: i + 2,
+        fresh: parseNumberLoose(fresh),
+        fu: parseNumberLoose(fu),
+      };
+    }
+  }
+  return { rowIndex: null, fresh: 0, fu: 0 };
+}
+
+async function addToStaffReport(dateStr, staff, type, amount) {
+  const row = await getStaffRow(dateStr, staff);
+
+  const freshAdd = type === "vcardfresh" ? amount : 0;
+  const fuAdd = type === "vcardfu" ? amount : 0;
+
+  if (!row.rowIndex) {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: `${STAFF_SHEET}!A1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[dateStr, staff, freshAdd, fuAdd]] },
+    });
+    return { staff, fresh: freshAdd, fu: fuAdd };
+  }
+
+  const newFresh = row.fresh + freshAdd;
+  const newFu = row.fu + fuAdd;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: `${STAFF_SHEET}!A${row.rowIndex}:D${row.rowIndex}`,
+    valueInputOption: "RAW",
+    requestBody: { values: [[dateStr, staff, newFresh, newFu]] },
+  });
+
+  return { staff, fresh: newFresh, fu: newFu };
+}
+
+async function getStaffReportByDate(dateStr) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${STAFF_SHEET}!A2:D`,
+  });
+
+  const rows = res.data.values || [];
+  const map = new Map(); // staff -> {fresh, fu}
+
+  for (const r of rows) {
+    const [date, staff, fresh, fu] = r || [];
+    if (String(date || "").trim() !== dateStr) continue;
+
+    const key = String(staff || "").trim() || "UNKNOWN";
+    const cur = map.get(key) || { fresh: 0, fu: 0 };
+    cur.fresh += parseNumberLoose(fresh);
+    cur.fu += parseNumberLoose(fu);
+    map.set(key, cur);
+  }
+
+  const arr = [...map.entries()].map(([staff, v]) => ({
+    staff,
+    fresh: v.fresh,
+    fu: v.fu,
+    total: v.fresh + v.fu,
+  }));
+  arr.sort((a, b) => b.total - a.total);
+  return arr;
+}
+
+async function getStaffReportByMonth(month, year) {
+  const mm = String(month).padStart(2, "0");
+  const prefix = `${year}-${mm}-`;
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${STAFF_SHEET}!A2:D`,
+  });
+
+  const rows = res.data.values || [];
+  const map = new Map(); // staff -> {fresh, fu}
+
+  for (const r of rows) {
+    const [date, staff, fresh, fu] = r || [];
+    const ds = String(date || "").trim();
+    if (!ds.startsWith(prefix)) continue;
+
+    const key = String(staff || "").trim() || "UNKNOWN";
+    const cur = map.get(key) || { fresh: 0, fu: 0 };
+    cur.fresh += parseNumberLoose(fresh);
+    cur.fu += parseNumberLoose(fu);
+    map.set(key, cur);
+  }
+
+  const arr = [...map.entries()].map(([staff, v]) => ({
+    staff,
+    fresh: v.fresh,
+    fu: v.fu,
+    total: v.fresh + v.fu,
+  }));
+  arr.sort((a, b) => b.total - a.total);
+  return { year, month: mm, rows: arr };
 }
 
 /* =======================
@@ -240,7 +392,7 @@ async function processQueue() {
   if (busy || queue.length === 0) return;
   busy = true;
 
-  const { chatId, userId, take, type } = queue.shift();
+  const { chatId, userId, take, type, staff } = queue.shift();
   const { col, label } = COMMANDS[type];
 
   try {
@@ -253,7 +405,7 @@ async function processQueue() {
     });
 
     const numbers = (res.data.values || [])
-      .map((v) => String(v[0] || "").replace(/\D/g, ""))
+      .map((v) => String(v?.[0] || "").replace(/\D/g, ""))
       .filter((v) => v.length >= 10);
 
     if (numbers.length < take) {
@@ -317,6 +469,14 @@ END:VCARD`
       console.error("❌ REPORT ERROR:", e);
     }
 
+    // UPDATE STAFF REPORT (SETELAH SUKSES)
+    try {
+      const dateStr = rep?.dateStr || todayKeyWIB();
+      await addToStaffReport(dateStr, staff || "UNKNOWN", type, take);
+    } catch (e) {
+      console.error("❌ STAFF REPORT ERROR:", e);
+    }
+
     if (rep) {
       await bot.sendMessage(
         userId,
@@ -350,18 +510,20 @@ bot.on("message", async (msg) => {
   if (text === "/start") {
     await bot.sendMessage(
       chatId,
-      "✅ Bot aktif.\n\nGunakan:\n#vcardfresh JUMLAH\n#vcardfu JUMLAH\n\nLaporan:\n/report\n/reportdate YYYY-MM-DD\n/reportmonth BULAN(1-12) TAHUN\n/reset (opsional)\n\nContoh:\n/reportdate 2026-02-22\n/reportmonth 12 2025\n/reportmonth 1 2026\n/reportmonth 2 2026"
+      "✅ Bot aktif.\n\nGunakan:\n#vcardfresh JUMLAH\n#vcardfu JUMLAH\n\nLaporan:\n/report\n/reportdate YYYY-MM-DD\n/reportmonth BULAN(1-12) TAHUN\n/reportstaff\n/reportstaffdate YYYY-MM-DD\n/reportstaffmonth BULAN(1-12) TAHUN\n/reset (opsional)\n\nContoh:\n/reportdate 2026-02-22\n/reportmonth 2 2026\n/reportstaffmonth 2 2026"
     );
     return;
   }
 
-  // REPORT HARIAN
+  // REPORT HARIAN + SISA STOK
   if (text === "/report") {
     try {
       const rep = await getReportToday();
+      const stock = await getStockCounts();
+
       await bot.sendMessage(
         chatId,
-        `📊 REPORT HARI INI (${rep.dateStr})\n✅ FRESH keluar: ${rep.fresh}\n✅ FU keluar: ${rep.fu}`
+        `📊 REPORT HARI INI (${rep.dateStr})\n✅ FRESH keluar: ${rep.fresh}\n✅ FU keluar: ${rep.fu}\n\n📦 SISA STOK\nFRESH (A): ${stock.freshLeft}\nFU (D): ${stock.fuLeft}`
       );
     } catch (e) {
       console.error("❌ /report ERROR:", e);
@@ -401,10 +563,7 @@ bot.on("message", async (msg) => {
     const year = parseInt(rm[2], 10);
 
     if (month < 1 || month > 12) {
-      await bot.sendMessage(
-        chatId,
-        "❌ Format salah. Contoh:\n/reportmonth 12 2025\n/reportmonth 1 2026\n/reportmonth 2 2026"
-      );
+      await bot.sendMessage(chatId, "❌ Format salah. Contoh: /reportmonth 2 2026");
       return;
     }
 
@@ -417,6 +576,87 @@ bot.on("message", async (msg) => {
     } catch (e) {
       console.error("❌ /reportmonth ERROR:", e);
       await bot.sendMessage(chatId, "❌ Gagal ambil report bulanan.");
+    }
+    return;
+  }
+
+  // REPORT STAFF HARI INI
+  if (text === "/reportstaff") {
+    try {
+      const dateStr = todayKeyWIB();
+      const rows = await getStaffReportByDate(dateStr);
+
+      if (!rows.length) {
+        await bot.sendMessage(chatId, `📋 REPORT STAFF (${dateStr})\nBelum ada data.`);
+        return;
+      }
+
+      const lines = rows.map(
+        (r, i) => `${i + 1}. ${r.staff} — FRESH: ${r.fresh} | FU: ${r.fu} | TOTAL: ${r.total}`
+      );
+
+      await bot.sendMessage(chatId, `📋 REPORT STAFF (${dateStr})\n` + lines.join("\n"));
+    } catch (e) {
+      console.error("❌ /reportstaff ERROR:", e);
+      await bot.sendMessage(chatId, "❌ Gagal ambil report staff.");
+    }
+    return;
+  }
+
+  // REPORT STAFF TANGGAL: /reportstaffdate 2026-02-22
+  const rsd = text.match(/^\/reportstaffdate\s+(\d{4}-\d{2}-\d{2})$/i);
+  if (rsd) {
+    const dateStr = rsd[1];
+    try {
+      const rows = await getStaffReportByDate(dateStr);
+
+      if (!rows.length) {
+        await bot.sendMessage(chatId, `📋 REPORT STAFF (${dateStr})\nData tidak ditemukan.`);
+        return;
+      }
+
+      const lines = rows.map(
+        (r, i) => `${i + 1}. ${r.staff} — FRESH: ${r.fresh} | FU: ${r.fu} | TOTAL: ${r.total}`
+      );
+
+      await bot.sendMessage(chatId, `📋 REPORT STAFF (${dateStr})\n` + lines.join("\n"));
+    } catch (e) {
+      console.error("❌ /reportstaffdate ERROR:", e);
+      await bot.sendMessage(chatId, "❌ Gagal ambil report staff tanggal.");
+    }
+    return;
+  }
+
+  // REPORT STAFF BULANAN: /reportstaffmonth 2 2026
+  const rsm = text.match(/^\/reportstaffmonth\s+(\d{1,2})\s+(\d{4})$/i);
+  if (rsm) {
+    const month = parseInt(rsm[1], 10);
+    const year = parseInt(rsm[2], 10);
+
+    if (month < 1 || month > 12) {
+      await bot.sendMessage(chatId, "❌ Format salah. Contoh: /reportstaffmonth 2 2026");
+      return;
+    }
+
+    try {
+      const rep = await getStaffReportByMonth(month, year);
+
+      if (!rep.rows.length) {
+        await bot.sendMessage(chatId, `📋 REPORT STAFF BULAN ${rep.year}-${rep.month}\nBelum ada data.`);
+        return;
+      }
+
+      const lines = rep.rows.map(
+        (r, i) => `${i + 1}. ${r.staff} — FRESH: ${r.fresh} | FU: ${r.fu} | TOTAL: ${r.total}`
+      );
+
+      await bot.sendMessage(
+        chatId,
+        `📋 REPORT STAFF BULAN ${rep.year}-${rep.month}\n` + lines.join("\n")
+      );
+    } catch (e) {
+      console.error("❌ /reportstaffmonth ERROR:", e);
+      await bot.sendMessage(chatId, "❌ Gagal ambil report staff bulanan.");
     }
     return;
   }
@@ -443,6 +683,7 @@ bot.on("message", async (msg) => {
   queue.push({
     chatId,
     userId,
+    staff: getStaffName(msg),
     type: m[1].toLowerCase(),
     take: parseInt(m[2], 10),
   });

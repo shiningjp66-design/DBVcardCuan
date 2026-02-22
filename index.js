@@ -105,10 +105,10 @@ async function processQueue() {
   const { col, label } = COMMANDS[type];
 
   try {
-    await bot.sendMessage(chatId, "✅ Udah di kirim lewat japri eaak...");
+    await bot.sendMessage(chatId, "✅ Cek Japri bro...");
 
     // WAJIB TEST DM
-    await bot.sendMessage(userId, "⏳ Sebentar beb...");
+    await bot.sendMessage(userId, "⏳ Sebentar Bro...");
 
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
@@ -170,7 +170,7 @@ END:VCARD`
       });
     }
 
-    await bot.sendMessage(userId, "✅ VCARD udah dikirim semua eakkk");
+    await bot.sendMessage(userId, "✅ VCARD Done Kirim");
 
   } catch (e) {
     console.error("❌ ERROR:", e);
@@ -205,11 +205,12 @@ bot.on("message", msg => {
     take: parseInt(m[2], 10),
   });
 
-  bot.sendMessage(chatId, "📥 Cek japri ea");
+  bot.sendMessage(chatId, "📥 Cek japri Bro");
   processQueue();
 });
 
 console.log("🤖 BOT FINAL FIX — FILE PASTI TERKIRIM");
+
 
 
 
